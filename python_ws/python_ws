@@ -1,0 +1,163 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import pymysql
+from PIL import Image
+import requests as req
+from io import BytesIO
+from ultralytics import YOLO
+import cv2
+
+
+app = Flask(__name__)
+CORS(app)
+try:
+    model = YOLO("yolov8n.pt")  
+    print("YOLO model initialized successfully.")
+except Exception as e:
+    print(f"Error initializing YOLO model: {e}")
+    model = None  
+    
+
+
+# Configuration de la base de données
+DB_CONFIG = {
+    "host": "localhost",
+    "user": "root",
+    "password": "root",
+    "database": "projet_soa",
+    "port": 3306
+}
+
+def get_db_connection():
+    """Retourne une connexion à la base de données."""
+    return pymysql.connect(
+        host=DB_CONFIG["host"],
+        user=DB_CONFIG["user"],
+        password=DB_CONFIG["password"],
+        database=DB_CONFIG["database"],
+        port=DB_CONFIG["port"]
+    )
+
+@app.route('/vehicles', methods=['GET'])
+def get_vehicles():
+    """Retourne les données de la table 'vehicles' en JSON."""
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM vehicles;")
+            rows = cursor.fetchall()
+            columns = [column[0] for column in cursor.description]
+            vehicles = [dict(zip(columns, row)) for row in rows]
+        return jsonify(vehicles), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if connection:
+            connection.close()
+
+@app.route('/ajouter_vehicle', methods=['POST'])
+def add_vehicle():
+    """Ajoute un nouveau véhicule dans la table 'vehicles'."""
+    data = request.get_json()
+    required_fields = [
+        "price", "image_url", "type", "brand", "model", "year", "category", "created_at"
+    ]
+    for field in required_fields:
+        if field not in data:
+            return jsonify({"error": f"'{field}' est requis"}), 400
+
+    # Validation du type des données
+    if not isinstance(data["price"], (int, float)) or data["price"] <= 0:
+        return jsonify({"error": "'price' doit être un nombre positif"}), 400
+
+    if not isinstance(data["year"], int) or not (1900 <= data["year"] <= 2024):
+        return jsonify({"error": "'year' doit être un entier valide entre 1900 et 2024"}), 400
+
+    # Connexion à la base de données
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            sql = """
+                INSERT INTO vehicles (category, brand, model, year, price, type, image_url, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            """
+            cursor.execute(sql, (
+                data["category"],
+                data["brand"],
+                data["model"],
+                data["year"],
+                data["price"],
+                data["type"],
+                data["image_url"]
+            ))
+            connection.commit()
+        return jsonify({"message": "Véhicule ajouté avec succès"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if connection:
+            connection.close()
+            
+
+@app.route('/detect', methods=['GET'])
+def detect_object():
+    # Récupérer les paramètres 'image_path' et 'category' de la requête
+    image_url = request.args.get('image_path')  # Récupère l'URL de l'image de la query
+    category = request.args.get('category').capitalize()  # Récupère la catégorie de la query
+
+    if not image_url:
+        return jsonify({"error": "'image_path' est requis"}), 400
+    if not category:
+        return jsonify({"error": "'category' est requis"}), 400
+
+    category_map = {
+        'Voiture': 2,
+        'Camion': 7,
+        'Bicyclette': 1,
+        'Moto': 3
+    }
+
+    # Vérifier si la catégorie est supportée
+    if category not in category_map:
+        return jsonify({"error": f"Catégorie non supportée : {category}","isvalid":"false"}), 400
+
+    try:
+        # Charger l'image depuis l'URL
+        image = img_from_url(image_url)
+        if image is None:
+            return jsonify({"error": f"Impossible de charger l'image depuis l'URL : {image_url}","isvalid":"false"}), 400
+
+        # Remplacer 'model' par votre modèle YOLOv8 ou tout autre modèle utilisé pour la détection
+        # Exemple: model = YOLOv8(...)
+
+        # Résultats de la détection
+        results = model(image, classes=[category_map[category]], conf=0.5, verbose=False)
+
+        for r in results: 
+            if r.boxes: 
+                for box in r.boxes:
+                    cls = int(box.cls[0])  # Class index
+                    if cls == category_map[category]:
+                        return jsonify({"message": "Objet détecté", "category": category,"isvalid":"true"}), 200
+       
+        return jsonify({"message": "Aucun objet détecté","isvalid":"false"}), 404
+
+    except Exception as e:
+        return jsonify({"error": str(e),"isvalid":"false"}), 500
+
+
+
+
+            
+            
+def  img_from_url(url):
+    response = req.get(url)
+    response.raise_for_status()  
+    return Image.open(BytesIO(response.content))
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
+    
